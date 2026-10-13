@@ -36,6 +36,14 @@ jobs:
           git clone --depth 1 \
             https://github.com/LadybirdBrowser/ladybird.git
 
+      - name: Fix GLFunctions build dependency
+        working-directory: ladybird
+        run: |
+          grep -q 'add_dependencies(LibCompositing generate_GLFunctions.cpp)' \
+            Libraries/LibCompositing/CMakeLists.txt || \
+          printf '\nadd_dependencies(LibCompositing generate_GLFunctions.cpp)\n' \
+            >> Libraries/LibCompositing/CMakeLists.txt
+
       - name: Build Release
         working-directory: ladybird
         run: |
