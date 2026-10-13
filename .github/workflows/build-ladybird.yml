@@ -1,0 +1,74 @@
+
+name: Build Ladybird for Linux
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+
+    steps:
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            autoconf autoconf-archive automake \
+            build-essential ccache curl git \
+            fonts-liberation2 glslang-tools \
+            libdrm-dev libgl1-mesa-dev libncurses-dev \
+            libpulse-dev libtool nasm ninja-build \
+            pkg-config python3-venv tar unzip zip
+
+      - name: Install CMake
+        uses: jwlawson/actions-setup-cmake@v2
+        with:
+          cmake-version: '3.30.x'
+
+      - name: Install Qt 6.10
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: '6.10.0'
+          host: linux
+          target: desktop
+          arch: gcc_64
+          modules: 'qtpositioning qttools qtwayland'
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Clone Ladybird
+        run: |
+          git clone --depth 1 \
+            https://github.com/LadybirdBrowser/ladybird.git
+
+      - name: Build Release
+        working-directory: ladybird
+        run: |
+          ./Meta/ladybird.py build --jobs 2
+
+      - name: Install into staging directory
+        working-directory: ladybird
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/stage"
+          DESTDIR="$GITHUB_WORKSPACE/stage" \
+            ./Meta/ladybird.py install
+
+      - name: Package tar.gz
+        run: |
+          test -d stage
+          find stage -type f | head -100
+          tar -czf ladybird-linux-x86_64.tar.gz \
+            -C stage .
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ladybird-linux-x86_64
+          path: ladybird-linux-x86_64.tar.gz
+          if-no-files-found: error
+          retention-days: 7
