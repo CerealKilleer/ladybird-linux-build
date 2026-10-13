@@ -44,6 +44,14 @@ jobs:
           printf '\nadd_dependencies(LibCompositing generate_GLFunctions.cpp)\n' \
             >> Libraries/LibCompositing/CMakeLists.txt
 
+      - name: Fix wasm linker error
+        working-directory: ladybird
+        run: |
+          grep -q 'target_link_options(wasm PRIVATE "LINKER:--no-as-needed")' \
+            Utilities/CMakeLists.txt || \
+          printf '\ntarget_link_options(wasm PRIVATE "LINKER:--no-as-needed")\n' \
+            >> Utilities/CMakeLists.txt
+
       - name: Build Release
         working-directory: ladybird
         run: |
