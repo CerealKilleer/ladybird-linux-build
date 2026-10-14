@@ -57,6 +57,32 @@ jobs:
         run: |
           ./Meta/ladybird.py build --jobs 2
 
+      - name: Inspect build runtime dependencies
+        working-directory: ladybird
+        run: |
+          echo "=== Ladybird executable ==="
+          find Build -type f -name Ladybird -print
+
+          BIN="$(find Build -type f -name Ladybird -print -quit)"
+          test -n "$BIN"
+
+          echo "=== ldd ==="
+          ldd "$BIN"
+
+          echo "=== Relevant shared libraries in Build ==="
+          find Build -type f \( \
+            -name 'libskia.so*' -o \
+            -name 'libcpptrace.so*' -o \
+            -name 'libjpeg.so*' -o \
+            -name 'libavcodec-ladybird.so*' -o \
+            -name 'libavformat-ladybird.so*' -o \
+            -name 'libavutil-ladybird.so*' -o \
+            -name 'libswresample-ladybird.so*' \
+          \) -print
+
+          echo "=== vcpkg directories ==="
+          find Build -type d -name vcpkg_installed -print
+
       - name: Install into staging directory
         working-directory: ladybird
         run: |
