@@ -18,7 +18,7 @@ env:
 
 jobs:
   build:
-    # El runner solo hospeda el contenedor. El entorno real de compilación es Arch Linux.
+    # El runner solo hospeda el contenedor; el entorno real de compilación es Arch.
     runs-on: ubuntu-24.04
     container: archlinux:latest
     timeout-minutes: 360
@@ -33,15 +33,6 @@ jobs:
             qt6-base qt6-tools qt6-wayland qt6-positioning \
             libpulse libdrm glslang ttf-liberation
 
-      - name: Clone Ladybird
-        run: |
-          git clone https://github.com/LadybirdBrowser/ladybird.git
-          cd ladybird
-          if [ -n "${{ inputs.ref }}" ]; then
-            git checkout "${{ inputs.ref }}"
-          fi
-          echo "Compilando commit: $(git rev-parse HEAD)"
-
       - name: Restore caches
         uses: actions/cache@v4
         with:
@@ -52,8 +43,28 @@ jobs:
           restore-keys: |
             ladybird-arch-
 
+      # ladybird.py se niega a correr como root, así que creamos un usuario normal
+      # y le damos propiedad del workspace y de las cachés.
+      - name: Create non-root build user
+        run: |
+          useradd -m builder
+          mkdir -p /tmp/ccache /tmp/vcpkg-binary-cache
+          chown -R builder:builder "$GITHUB_WORKSPACE" /tmp/ccache /tmp/vcpkg-binary-cache
+
+      - name: Clone Ladybird
+        shell: runuser -u builder -- env HOME=/home/builder bash -e {0}
+        run: |
+          cd "$GITHUB_WORKSPACE"
+          git clone https://github.com/LadybirdBrowser/ladybird.git
+          cd ladybird
+          if [ -n "${{ inputs.ref }}" ]; then
+            git checkout "${{ inputs.ref }}"
+          fi
+          echo "Compilando commit: $(git rev-parse HEAD)"
+
       - name: Fix GLFunctions build dependency
         working-directory: ladybird
+        shell: runuser -u builder -- env HOME=/home/builder bash -e {0}
         run: |
           grep -q 'add_dependencies(LibCompositing generate_GLFunctions.cpp)' \
             Libraries/LibCompositing/CMakeLists.txt || \
@@ -62,6 +73,7 @@ jobs:
 
       - name: Fix wasm linker error
         working-directory: ladybird
+        shell: runuser -u builder -- env HOME=/home/builder bash -e {0}
         run: |
           grep -q 'target_link_options(wasm PRIVATE "LINKER:--no-as-needed")' \
             Utilities/CMakeLists.txt || \
@@ -70,12 +82,14 @@ jobs:
 
       - name: Build Release
         working-directory: ladybird
+        shell: runuser -u builder -- env HOME=/home/builder bash -e {0}
         run: |
           ./Meta/ladybird.py build --jobs "$(nproc)"
           ccache -s || true
 
       - name: Inspect build runtime dependencies
         working-directory: ladybird
+        shell: runuser -u builder -- env HOME=/home/builder bash -e {0}
         run: |
           BIN="$(find Build -type f -name Ladybird -print -quit)"
           test -n "$BIN"
@@ -89,6 +103,7 @@ jobs:
 
       - name: Package Ladybird
         working-directory: ladybird
+        shell: runuser -u builder -- env HOME=/home/builder bash -e {0}
         run: |
           set -euo pipefail
 
@@ -113,7 +128,6 @@ jobs:
           export LD_LIBRARY_PATH="$ROOT/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
           exec "$ROOT/bin/Ladybird" "$@"
           EOF
-          sed -i 's/^          //' "$STAGE/usr/local/bin/ladybird-wrapper"
           chmod +x "$STAGE/usr/local/bin/ladybird-wrapper"
 
           tar -czf "$GITHUB_WORKSPACE/ladybird-arch-x86_64.tar.gz" -C "$STAGE" .
