@@ -1,0 +1,125 @@
+
+name: Build Ladybird for Linux
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 360
+
+    steps:
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            autoconf autoconf-archive automake \
+            build-essential ccache cmake curl \
+            fonts-liberation2 git glslang-tools \
+            libdrm-dev libgl1-mesa-dev libncurses-dev \
+            libpulse-dev libtool nasm ninja-build \
+            pkg-config python3-venv \
+            qt6-base-private-dev \
+            qt6-positioning-dev \
+            qt6-tools-dev-tools \
+            qt6-wayland tar unzip zip
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Clone Ladybird
+        run: |
+          git clone --depth 1 \
+            https://github.com/LadybirdBrowser/ladybird.git
+
+      - name: Fix GLFunctions build dependency
+        working-directory: ladybird
+        run: |
+          grep -q 'add_dependencies(LibCompositing generate_GLFunctions.cpp)' \
+            Libraries/LibCompositing/CMakeLists.txt || \
+          printf '\nadd_dependencies(LibCompositing generate_GLFunctions.cpp)\n' \
+            >> Libraries/LibCompositing/CMakeLists.txt
+
+      - name: Fix wasm linker error
+        working-directory: ladybird
+        run: |
+          grep -q 'target_link_options(wasm PRIVATE "LINKER:--no-as-needed")' \
+            Utilities/CMakeLists.txt || \
+          printf '\ntarget_link_options(wasm PRIVATE "LINKER:--no-as-needed")\n' \
+            >> Utilities/CMakeLists.txt
+
+      - name: Build Release
+        working-directory: ladybird
+        run: |
+          ./Meta/ladybird.py build --jobs 2
+
+      - name: Inspect build runtime dependencies
+        working-directory: ladybird
+        run: |
+          echo "=== Ladybird executable ==="
+          find Build -type f -name Ladybird -print
+
+          BIN="$(find Build -type f -name Ladybird -print -quit)"
+          test -n "$BIN"
+
+          echo "=== ldd ==="
+          ldd "$BIN"
+
+          echo "=== Relevant shared libraries in Build ==="
+          find Build -type f \( \
+            -name 'libskia.so*' -o \
+            -name 'libcpptrace.so*' -o \
+            -name 'libjpeg.so*' -o \
+            -name 'libavcodec-ladybird.so*' -o \
+            -name 'libavformat-ladybird.so*' -o \
+            -name 'libavutil-ladybird.so*' -o \
+            -name 'libswresample-ladybird.so*' \
+          \) -print
+
+          echo "=== vcpkg directories ==="
+          find Build -type d -name vcpkg_installed -print
+
+
+      - name: Package Ladybird with vcpkg libraries
+        working-directory: ladybird
+        shell: bash
+        run: |
+          set -e
+
+          STAGE="$GITHUB_WORKSPACE/stage"
+          VCPKG_LIB="Build/release/vcpkg_installed/x64-linux-dynamic/lib"
+
+          mkdir -p "$STAGE"
+
+          DESTDIR="$STAGE" ./Meta/ladybird.py install
+
+          mkdir -p "$STAGE/usr/local/lib" "$STAGE/usr/local/bin"
+
+          cp -a "$VCPKG_LIB"/. "$STAGE/usr/local/lib/"
+
+          printf '%s\n' \
+            '#!/usr/bin/env bash' \
+            'set -e' \
+            'HERE="$(cd -- "$(dirname -- "$(readlink -f -- "$0")")" && pwd)"' \
+            'ROOT="$(cd -- "$HERE/../.." && pwd)"' \
+            'export LD_LIBRARY_PATH="$ROOT/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"' \
+            'exec "$ROOT/bin/Ladybird" "$@"' \
+            > "$STAGE/usr/local/bin/ladybird"
+
+          chmod +x "$STAGE/usr/local/bin/ladybird"
+
+          tar -czf "$GITHUB_WORKSPACE/ladybird-linux-x86_64.tar.gz" \
+            -C "$STAGE" .
+
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ladybird-linux-x86_64
+          path: ladybird-linux-x86_64.tar.gz
+          if-no-files-found: error
+          retention-days: 7

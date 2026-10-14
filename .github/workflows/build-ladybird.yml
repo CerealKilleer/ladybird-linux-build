@@ -1,40 +1,56 @@
-
-name: Build Ladybird for Linux
+name: Build Ladybird for Arch Linux
 
 on:
   workflow_dispatch:
+    inputs:
+      ref:
+        description: "Commit, tag o rama de Ladybird a compilar (vacío = master)"
+        required: false
+        default: ""
 
 permissions:
   contents: read
 
+env:
+  CCACHE_DIR: /tmp/ccache
+  CCACHE_MAXSIZE: 2G
+  VCPKG_DEFAULT_BINARY_CACHE: /tmp/vcpkg-binary-cache
+
 jobs:
   build:
-    runs-on: ubuntu-26.04
+    # El runner solo hospeda el contenedor. El entorno real de compilación es Arch Linux.
+    runs-on: ubuntu-24.04
+    container: archlinux:latest
     timeout-minutes: 360
 
     steps:
       - name: Install build dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            autoconf autoconf-archive automake \
-            build-essential ccache cmake curl \
-            fonts-liberation2 git glslang-tools \
-            libdrm-dev libgl1-mesa-dev libncurses-dev \
-            libpulse-dev libtool nasm ninja-build \
-            pkg-config python3-venv \
-            qt6-base-private-dev \
-            qt6-positioning-dev \
-            qt6-tools-dev-tools \
-            qt6-wayland tar unzip zip
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+          pacman -Syu --noconfirm
+          pacman -S --noconfirm --needed \
+            base-devel git cmake ninja ccache nasm curl zip unzip tar zstd \
+            pkgconf python rust autoconf-archive \
+            qt6-base qt6-tools qt6-wayland qt6-positioning \
+            libpulse libdrm glslang ttf-liberation
 
       - name: Clone Ladybird
         run: |
-          git clone --depth 1 \
-            https://github.com/LadybirdBrowser/ladybird.git
+          git clone https://github.com/LadybirdBrowser/ladybird.git
+          cd ladybird
+          if [ -n "${{ inputs.ref }}" ]; then
+            git checkout "${{ inputs.ref }}"
+          fi
+          echo "Compilando commit: $(git rev-parse HEAD)"
+
+      - name: Restore caches
+        uses: actions/cache@v4
+        with:
+          path: |
+            /tmp/ccache
+            /tmp/vcpkg-binary-cache
+          key: ladybird-arch-${{ github.run_id }}
+          restore-keys: |
+            ladybird-arch-
 
       - name: Fix GLFunctions build dependency
         working-directory: ladybird
@@ -55,71 +71,67 @@ jobs:
       - name: Build Release
         working-directory: ladybird
         run: |
-          ./Meta/ladybird.py build --jobs 2
+          ./Meta/ladybird.py build --jobs "$(nproc)"
+          ccache -s || true
 
       - name: Inspect build runtime dependencies
         working-directory: ladybird
         run: |
-          echo "=== Ladybird executable ==="
-          find Build -type f -name Ladybird -print
-
           BIN="$(find Build -type f -name Ladybird -print -quit)"
           test -n "$BIN"
-
+          echo "=== Binary: $BIN ==="
+          echo "=== RPATH/RUNPATH ==="
+          readelf -d "$BIN" | grep -E 'RPATH|RUNPATH' || echo "(ninguno)"
           echo "=== ldd ==="
-          ldd "$BIN"
+          ldd "$BIN" || true
+          echo "=== vcpkg lib dirs ==="
+          find Build -type d -path '*vcpkg_installed*/lib' -print
 
-          echo "=== Relevant shared libraries in Build ==="
-          find Build -type f \( \
-            -name 'libskia.so*' -o \
-            -name 'libcpptrace.so*' -o \
-            -name 'libjpeg.so*' -o \
-            -name 'libavcodec-ladybird.so*' -o \
-            -name 'libavformat-ladybird.so*' -o \
-            -name 'libavutil-ladybird.so*' -o \
-            -name 'libswresample-ladybird.so*' \
-          \) -print
-
-          echo "=== vcpkg directories ==="
-          find Build -type d -name vcpkg_installed -print
-
-
-      - name: Package Ladybird with vcpkg libraries
+      - name: Package Ladybird
         working-directory: ladybird
-        shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
           STAGE="$GITHUB_WORKSPACE/stage"
-          VCPKG_LIB="Build/release/vcpkg_installed/x64-linux-dynamic/lib"
+          VCPKG_LIB="$(find Build -type d -path '*vcpkg_installed/x64-linux-dynamic/lib' -print -quit)"
+          test -n "$VCPKG_LIB"
 
           mkdir -p "$STAGE"
-
           DESTDIR="$STAGE" ./Meta/ladybird.py install
 
+          # Solo librerías compartidas de vcpkg (sin .a, pkgconfig, cmake, etc.)
           mkdir -p "$STAGE/usr/local/lib" "$STAGE/usr/local/bin"
+          find "$VCPKG_LIB" -maxdepth 1 \( -type f -o -type l \) -name '*.so*' \
+            -exec cp -a {} "$STAGE/usr/local/lib/" \;
 
-          cp -a "$VCPKG_LIB"/. "$STAGE/usr/local/lib/"
+          # Launcher: ROOT = usr/local (donde están bin/ y lib/)
+          cat > "$STAGE/usr/local/bin/ladybird-wrapper" <<'EOF'
+          #!/usr/bin/env bash
+          set -e
+          HERE="$(cd -- "$(dirname -- "$(readlink -f -- "$0")")" && pwd)"
+          ROOT="$(cd -- "$HERE/.." && pwd)"
+          export LD_LIBRARY_PATH="$ROOT/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+          exec "$ROOT/bin/Ladybird" "$@"
+          EOF
+          sed -i 's/^          //' "$STAGE/usr/local/bin/ladybird-wrapper"
+          chmod +x "$STAGE/usr/local/bin/ladybird-wrapper"
 
-          printf '%s\n' \
-            '#!/usr/bin/env bash' \
-            'set -e' \
-            'HERE="$(cd -- "$(dirname -- "$(readlink -f -- "$0")")" && pwd)"' \
-            'ROOT="$(cd -- "$HERE/../.." && pwd)"' \
-            'export LD_LIBRARY_PATH="$ROOT/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"' \
-            'exec "$ROOT/bin/Ladybird" "$@"' \
-            > "$STAGE/usr/local/bin/ladybird"
+          tar -czf "$GITHUB_WORKSPACE/ladybird-arch-x86_64.tar.gz" -C "$STAGE" .
 
-          chmod +x "$STAGE/usr/local/bin/ladybird"
-
-          tar -czf "$GITHUB_WORKSPACE/ladybird-linux-x86_64.tar.gz" \
-            -C "$STAGE" .
-
+      - name: Verify staged binary resolves all libraries
+        run: |
+          ROOT="$GITHUB_WORKSPACE/stage/usr/local"
+          export LD_LIBRARY_PATH="$ROOT/lib"
+          if ldd "$ROOT/bin/Ladybird" | grep 'not found'; then
+            echo "::error::Faltan librerías en el paquete"
+            exit 1
+          fi
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ladybird-linux-x86_64
-          path: ladybird-linux-x86_64.tar.gz
+          name: ladybird-arch-x86_64
+          path: ladybird-arch-x86_64.tar.gz
           if-no-files-found: error
           retention-days: 7
+          compression-level: 0
